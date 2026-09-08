@@ -748,3 +748,132 @@ fn graphql_response_for_node(
         }
     })
 }
+
+#[test]
+fn graphql_recovery_updates_relations_without_marking_read_items_unread() {
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/search/issues"))
+            .times(3)
+            .respond_with(json_encoded(search_response())),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/api/graphql"))
+            .times(3)
+            .respond_with(cycle(vec![
+                Box::new(status_code(500)),
+                Box::new(json_encoded(graphql_response("APPROVED", true))),
+                Box::new(json_encoded(graphql_response("APPROVED", true))),
+            ])),
+    );
+    let storage = Storage::in_memory().expect("storage");
+    let config = config_for_server(&server);
+    let host_id = storage.ensure_host(&config.host).expect("host");
+    let id = storage
+        .add_saved_query(host_id, "PRs", "is:pr")
+        .expect("query");
+    let queries = storage.list_saved_queries(host_id).expect("queries");
+    let first =
+        sync::refresh_saved_query(&config, &storage, host_id, &queries[0]).expect("first refresh");
+    let item_id = first.changed_item_ids[0];
+    storage.set_read_state(item_id, false).expect("read");
+    let recovered = sync::refresh_saved_queries(&config, &storage, host_id, &queries);
+    assert_eq!(
+        recovered[0].1.as_ref().expect("recovery").changed_item_ids,
+        vec![item_id]
+    );
+    let items = storage
+        .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+        .expect("items");
+    assert!(!items[0].is_unread);
+    assert_eq!(items[0].review_status.as_deref(), Some("approved"));
+    assert_eq!(items[0].review_requests[0].login, "triage");
+    assert_eq!(items[0].reviewers[0].login, "reviewer");
+    for filter in ["involves:commenter", "involves:release-team"] {
+        assert_eq!(
+            storage
+                .list_items_for_saved_query(id, None, Some(filter), SortOrder::UpdatedDesc)
+                .expect("filtered items")
+                .len(),
+            1
+        );
+    }
+    let repeated =
+        sync::refresh_saved_query(&config, &storage, host_id, &queries[0]).expect("repeat");
+    assert_eq!(repeated.changed_count, 0);
+}
+
+#[test]
+fn edited_query_refresh_discovers_older_items_without_the_previous_delta() {
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(all_of![
+            request::method_path("GET", "/search/issues"),
+            request::query(url_decoded(contains(("q", "repo:acme/project is:pr")))),
+        ])
+        .respond_with(json_encoded(search_response())),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/api/graphql"))
+            .respond_with(json_encoded(graphql_response("APPROVED", true))),
+    );
+    let storage = Storage::in_memory().expect("storage");
+    let config = config_for_server(&server);
+    let host_id = storage.ensure_host(&config.host).expect("host");
+    let id = storage
+        .add_saved_query(host_id, "Old", "repo:acme/old")
+        .expect("query");
+    storage.mark_saved_query_sync_success(id).expect("sync");
+    storage
+        .update_saved_query_configured(
+            id,
+            "New",
+            "repo:acme/project is:pr",
+            StreamSource::IssueOrPullRequest,
+            true,
+        )
+        .expect("edit");
+    let queries = storage.list_saved_queries(host_id).expect("queries");
+    let stats =
+        sync::refresh_saved_query(&config, &storage, host_id, &queries[0]).expect("refresh");
+    assert_eq!(stats.processed_count, 1);
+}
+
+#[test]
+fn obsolete_refresh_cannot_restore_matches_after_a_query_edit() {
+    let server = Server::run();
+    server.expect(
+        Expectation::matching(request::method_path("GET", "/search/issues"))
+            .respond_with(json_encoded(search_response())),
+    );
+    server.expect(
+        Expectation::matching(request::method_path("POST", "/api/graphql"))
+            .respond_with(json_encoded(graphql_response("APPROVED", true))),
+    );
+    let storage = Storage::in_memory().expect("storage");
+    let config = config_for_server(&server);
+    let host_id = storage.ensure_host(&config.host).expect("host");
+    let id = storage
+        .add_saved_query(host_id, "Old", "is:pr")
+        .expect("query");
+    let obsolete = storage
+        .list_saved_queries(host_id)
+        .expect("queries")
+        .remove(0);
+    storage
+        .update_saved_query(id, "New", "repo:acme/new")
+        .expect("edit");
+    let stats =
+        sync::refresh_saved_query(&config, &storage, host_id, &obsolete).expect("obsolete refresh");
+    assert_eq!(stats.processed_count, 0);
+    assert_eq!(
+        storage
+            .saved_query_last_successful_sync_at(id)
+            .expect("cursor"),
+        None
+    );
+    assert!(storage
+        .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+        .expect("items")
+        .is_empty());
+}

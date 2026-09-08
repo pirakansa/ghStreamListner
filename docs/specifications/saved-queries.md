@@ -67,9 +67,17 @@ Remote sources request updated-item discovery independently of the stream view
 sort. Existing definitions without a source type import as issue and pull
 request streams.
 
-The last successful sync timestamp is maintained by refresh. Issue and pull
-request streams use it to build repeat REST Search delta queries; discussion and
-ProjectV2 streams do not use it for remote query construction.
+The last successful sync timestamp records the discovery start time of the last
+successfully persisted refresh. Issue and pull request streams use it to build
+repeat REST Search delta queries; discussion and ProjectV2 streams do not use it
+for remote query construction.
+
+Changing a saved query's search expression or source clears its sync timestamp,
+last sync error, and cached query-to-item matches atomically. The next refresh
+therefore discovers items without the previous definition's delta constraint.
+Shared items, their local read/bookmark/archive state, and other saved queries'
+matches are retained. Renaming a query, changing its enabled state, or trimming
+surrounding whitespace from the same search expression does not reset its cache.
 
 ProjectV2 query strings must identify a project as a project URL,
 `node:PROJECT_ID`, `org:OWNER number:N`, or `user:OWNER number:N`. ProjectV2

@@ -202,14 +202,7 @@ impl Storage {
     }
 
     pub fn update_saved_query(&self, saved_query_id: i64, name: &str, query: &str) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.connection().execute(
-            "UPDATE saved_queries
-             SET name = ?1, query = ?2, updated_at = ?3
-             WHERE id = ?4",
-            params![name.trim(), query.trim(), now, saved_query_id],
-        )?;
-        Ok(())
+        self.update_saved_query_fields(saved_query_id, name, query, None, None)
     }
 
     pub fn update_saved_query_for_source(
@@ -219,20 +212,7 @@ impl Storage {
         query: &str,
         source: StreamSource,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.connection().execute(
-            "UPDATE saved_queries
-             SET name = ?1, query = ?2, resource_type = ?3, updated_at = ?4
-             WHERE id = ?5",
-            params![
-                name.trim(),
-                query.trim(),
-                source.as_db_value(),
-                now,
-                saved_query_id
-            ],
-        )?;
-        Ok(())
+        self.update_saved_query_fields(saved_query_id, name, query, Some(source), None)
     }
 
     pub fn update_saved_query_configured(
@@ -243,21 +223,57 @@ impl Storage {
         source: StreamSource,
         enabled: bool,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.connection().execute(
-            "UPDATE saved_queries
-             SET name = ?1, query = ?2, resource_type = ?3, enabled = ?4, updated_at = ?5
-             WHERE id = ?6",
-            params![
-                name.trim(),
-                query.trim(),
-                source.as_db_value(),
-                if enabled { 1 } else { 0 },
-                now,
-                saved_query_id
-            ],
-        )?;
-        Ok(())
+        self.update_saved_query_fields(saved_query_id, name, query, Some(source), Some(enabled))
+    }
+
+    fn update_saved_query_fields(
+        &self,
+        saved_query_id: i64,
+        name: &str,
+        query: &str,
+        source: Option<StreamSource>,
+        enabled: Option<bool>,
+    ) -> Result<()> {
+        self.with_immediate_transaction(|storage| {
+            let now = Utc::now().to_rfc3339();
+            let source = source.map(StreamSource::as_db_value);
+            let reset = storage.connection().execute(
+                "UPDATE saved_queries
+                 SET last_successful_sync_at = NULL, last_sync_error = NULL
+                 WHERE id = ?1 AND (query != ?2 OR resource_type != COALESCE(?3, resource_type))",
+                params![saved_query_id, query.trim(), source],
+            )?;
+            if reset > 0 {
+                storage.connection().execute(
+                    "DELETE FROM saved_query_matches WHERE saved_query_id = ?1",
+                    params![saved_query_id],
+                )?;
+            }
+            storage.connection().execute(
+                "UPDATE saved_queries
+                 SET name = ?1, query = ?2, resource_type = COALESCE(?3, resource_type),
+                     enabled = COALESCE(?4, enabled), updated_at = ?5
+                 WHERE id = ?6",
+                params![
+                    name.trim(),
+                    query.trim(),
+                    source,
+                    enabled,
+                    now,
+                    saved_query_id
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn saved_query_definition_matches(&self, query: &SavedQuery) -> Result<bool> {
+        Ok(self.connection().query_row(
+            "SELECT EXISTS(SELECT 1 FROM saved_queries
+             WHERE id = ?1 AND query = ?2 AND resource_type = ?3)",
+            params![query.id, query.query, query.source.as_db_value()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn add_filter_stream(
@@ -457,12 +473,19 @@ impl Storage {
     }
 
     pub fn mark_saved_query_sync_success(&self, saved_query_id: i64) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
+        self.mark_saved_query_sync_success_at(saved_query_id, &Utc::now().to_rfc3339())
+    }
+
+    pub(crate) fn mark_saved_query_sync_success_at(
+        &self,
+        saved_query_id: i64,
+        started_at: &str,
+    ) -> Result<()> {
         self.connection().execute(
             "UPDATE saved_queries
-             SET last_successful_sync_at = ?1, last_sync_error = NULL, updated_at = ?1
+             SET last_successful_sync_at = ?1, last_sync_error = NULL, updated_at = ?3
              WHERE id = ?2",
-            params![now, saved_query_id],
+            params![started_at, saved_query_id, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }

@@ -56,6 +56,7 @@ struct CachedSave {
 enum PendingRefresh {
     Fetched {
         query: SavedQuery,
+        started_at: String,
         items: Vec<github::FetchedStreamItem>,
     },
     Failed {
@@ -116,6 +117,7 @@ fn refresh_saved_query_with_cache(
     saved_query: &SavedQuery,
     item_cache: &mut HashMap<StreamItemKey, CachedSave>,
 ) -> Result<RefreshStats, SyncError> {
+    let started_at = Utc::now().to_rfc3339();
     let mut items = fetch_saved_query_items(config, storage, saved_query)?;
     let enrichment = if matches!(
         saved_query.source,
@@ -140,7 +142,7 @@ fn refresh_saved_query_with_cache(
             into_upsert(host_id, item, graphql_enriched)
         })
         .collect::<Vec<_>>();
-    persist_saved_query_items(storage, saved_query, &items, item_cache)
+    persist_saved_query_items(storage, saved_query, &items, item_cache, &started_at)
 }
 
 fn fetch_saved_query_items(
@@ -207,10 +209,15 @@ fn persist_saved_query_items(
     saved_query: &SavedQuery,
     items: &[StreamItemUpsert],
     item_cache: &mut HashMap<StreamItemKey, CachedSave>,
+    started_at: &str,
 ) -> Result<RefreshStats, SyncError> {
     let mut pending_cache = HashMap::<StreamItemKey, CachedSave>::new();
     let stats = storage
         .with_immediate_transaction(|storage| {
+            // An edit during the network request invalidates the fetched query results.
+            if !storage.saved_query_definition_matches(saved_query)? {
+                return Ok(RefreshStats::default());
+            }
             let mut stats = RefreshStats {
                 processed_count: items.len(),
                 changed_count: 0,
@@ -244,7 +251,7 @@ fn persist_saved_query_items(
                     stats.changed_item_ids.push(save.id);
                 }
             }
-            storage.mark_saved_query_sync_success(saved_query.id)?;
+            storage.mark_saved_query_sync_success_at(saved_query.id, started_at)?;
             Ok(stats)
         })
         .map_err(SyncError::from)?;
@@ -261,24 +268,26 @@ pub fn refresh_saved_queries(
     let mut pending = saved_queries
         .iter()
         .filter(|query| query.enabled)
-        .map(
-            |query| match fetch_saved_query_items(config, storage, query) {
+        .map(|query| {
+            let started_at = Utc::now().to_rfc3339();
+            match fetch_saved_query_items(config, storage, query) {
                 Ok(items) => PendingRefresh::Fetched {
                     query: query.clone(),
+                    started_at,
                     items,
                 },
                 Err(error) => PendingRefresh::Failed {
                     query_id: query.id,
                     error,
                 },
-            },
-        )
+            }
+        })
         .collect::<Vec<_>>();
 
     let successful_items = pending
         .iter_mut()
         .filter_map(|refresh| match refresh {
-            PendingRefresh::Fetched { query, items }
+            PendingRefresh::Fetched { query, items, .. }
                 if matches!(
                     query.source,
                     StreamSource::IssueOrPullRequest | StreamSource::ProjectV2
@@ -298,7 +307,11 @@ pub fn refresh_saved_queries(
         .into_iter()
         .map(|refresh| {
             let (query_id, result) = match refresh {
-                PendingRefresh::Fetched { query, items } => {
+                PendingRefresh::Fetched {
+                    query,
+                    items,
+                    started_at,
+                } => {
                     let items = items
                         .into_iter()
                         .map(|item| {
@@ -312,7 +325,13 @@ pub fn refresh_saved_queries(
                         .collect::<Vec<_>>();
                     (
                         query.id,
-                        persist_saved_query_items(storage, &query, &items, &mut item_cache),
+                        persist_saved_query_items(
+                            storage,
+                            &query,
+                            &items,
+                            &mut item_cache,
+                            &started_at,
+                        ),
                     )
                 }
                 PendingRefresh::Failed { query_id, error } => (query_id, Err(error)),
@@ -328,4 +347,74 @@ pub fn refresh_saved_queries(
 fn short_error(error: &SyncError) -> String {
     let message = error.to_string();
     message.chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delayed_persistence_keeps_each_query_fetch_start_as_the_delta_cursor() {
+        let storage = Storage::in_memory().expect("storage");
+        let config = AppConfig::default_with_pat("token".to_owned());
+        let host_id = storage.ensure_host(&config.host).expect("host");
+        storage
+            .add_saved_query(host_id, "First", "is:pr")
+            .expect("first query");
+        storage
+            .add_saved_query(host_id, "Second", "is:issue")
+            .expect("second query");
+        let queries = storage.list_saved_queries(host_id).expect("queries");
+        let starts = ["2026-05-25T12:00:00Z", "2026-05-25T12:03:00Z"];
+        let expected = ["2026-05-25T11:59:00Z", "2026-05-25T12:02:00Z"];
+        let mut cache = HashMap::new();
+        for ((query, started_at), expected_since) in queries.iter().zip(starts).zip(expected) {
+            persist_saved_query_items(&storage, query, &[], &mut cache, started_at)
+                .expect("delayed save");
+            let cursor = storage
+                .saved_query_last_successful_sync_at(query.id)
+                .expect("cursor");
+            assert_eq!(cursor.as_deref(), Some(started_at));
+            assert_eq!(
+                issue_search_query(&query.query, cursor.as_deref()),
+                format!("{} updated:>={expected_since}", query.query)
+            );
+        }
+    }
+
+    #[test]
+    fn failed_persistence_does_not_advance_the_delta_cursor() {
+        let storage = Storage::in_memory().expect("storage");
+        let config = AppConfig::default_with_pat("token".to_owned());
+        let host_id = storage.ensure_host(&config.host).expect("host");
+        let id = storage
+            .add_saved_query(host_id, "PRs", "is:pr")
+            .expect("query");
+        storage
+            .mark_saved_query_sync_success_at(id, "2026-05-25T12:00:00Z")
+            .expect("previous sync");
+        let query = storage
+            .list_saved_queries(host_id)
+            .expect("queries")
+            .remove(0);
+        storage.connection().execute_batch(
+            "CREATE TEMP TRIGGER reject_sync BEFORE UPDATE OF last_successful_sync_at ON saved_queries
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
+        ).expect("trigger");
+        assert!(persist_saved_query_items(
+            &storage,
+            &query,
+            &[],
+            &mut HashMap::new(),
+            "2026-05-25T12:03:00Z"
+        )
+        .is_err());
+        assert_eq!(
+            storage
+                .saved_query_last_successful_sync_at(id)
+                .expect("cursor")
+                .as_deref(),
+            Some("2026-05-25T12:00:00Z")
+        );
+    }
 }

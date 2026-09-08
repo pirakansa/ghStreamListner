@@ -29,9 +29,12 @@ flow.
 - REST Search discovery requests the first page with `per_page=100&page=1`.
 - After an issue and pull request saved query has a successful sync timestamp,
   refresh appends an `updated:>=TIMESTAMP` qualifier to that saved query's base
-  GitHub Search query. The timestamp is the last successful sync time minus a
-  60 second overlap window, formatted as UTC seconds when the stored value is
-  valid RFC 3339.
+  GitHub Search query. The timestamp is the discovery start time of the last successfully persisted
+  refresh for that query minus a 60 second overlap window, formatted as UTC
+  seconds when the stored value is valid RFC 3339. Each query captures its own
+  start time before discovery, so time spent fetching other queries, enriching,
+  or saving does not create a gap in the next delta window. Failed saves do not
+  advance this timestamp.
 - If the stored successful sync timestamp cannot be parsed as RFC 3339, refresh
   still appends `updated:>=` with the stored timestamp value.
 - REST Search results are parsed into normalized stream item data.
@@ -56,6 +59,11 @@ flow.
   or rendered.
 - Failed GraphQL enrichment must preserve previously stored merge and review
   metadata for an existing pull request.
+- Successful GraphQL enrichment updates review requests, reviewers, participants,
+  and mentions even when the remote item update timestamp has not advanced.
+  Changed enrichment refreshes sidebar counts and participates in the view update
+  banner, but does not by itself mark a read item unread. Identical enrichment
+  does not report another change.
 - When multiple saved queries refresh together, REST Search requests remain
   sequential and query-specific.
 - GraphQL enrichment deduplicates pull request node IDs across those REST Search
@@ -74,7 +82,10 @@ flow.
    items only, including items discovered from ProjectV2 streams.
 3. Upsert stream items and query matches into SQLite; identical items returned
    by multiple saved queries in one refresh reuse a single metadata save.
-4. Mark query sync success or store a short sync error.
+4. Mark query sync success using its captured discovery start time, or store a
+   short sync error. If the query was deleted or its search expression or source
+   changed before persistence, discard its fetched results without restoring old
+   matches or advancing its sync timestamp.
 5. Update refresh status and reload sidebar counts when stored items changed or
    a query refresh failed.
 6. If the refresh changes the displayed current view, retain the visible item
