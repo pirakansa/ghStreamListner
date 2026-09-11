@@ -81,70 +81,89 @@ impl StatusEntry {
 
 impl GhStreamApp {
     pub fn new() -> Self {
-        let config_path = config::default_config_path();
-        let database_path = config::default_database_path();
-        let setup = screens::setup::SetupState::default();
-        let stream = screens::stream::StreamState::default();
+        Self::from_paths(
+            config::default_config_path(),
+            config::default_database_path(),
+        )
+    }
 
-        match config::load_config(&config_path) {
+    fn from_paths(config_path: PathBuf, database_path: PathBuf) -> Self {
+        let (mode, status) = match config::load_config(&config_path) {
             Ok(config) => match Self::open_runtime(config, &database_path) {
-                Ok(runtime) => {
-                    let ready = "Ready".to_owned();
-                    let mut app = Self {
-                        config_path,
-                        database_path,
-                        mode: AppMode::Main(Box::new(runtime)),
-                        setup,
-                        stream,
-                        status: ready.clone(),
-                        status_history: vec![StatusEntry::new(ready)],
-                        last_poll_at: None,
-                        refresh_rx: None,
-                    };
-                    app.reload_current_view();
-                    app
-                }
-                Err(err) => {
-                    let status = format!("Database initialization failed: {err}");
-                    Self {
-                        config_path,
-                        database_path,
-                        mode: AppMode::Setup {
-                            previous_runtime: None,
-                        },
-                        setup,
-                        stream,
-                        status: status.clone(),
-                        status_history: vec![StatusEntry::new(status)],
-                        last_poll_at: None,
-                        refresh_rx: None,
-                    }
-                }
-            },
-            Err(err) => {
-                let status = first_run_status(&err);
-                Self {
-                    config_path,
-                    database_path,
-                    mode: AppMode::Setup {
+                Ok(runtime) => (AppMode::Main(Box::new(runtime)), "Ready".to_owned()),
+                Err(err) => (
+                    AppMode::Setup {
                         previous_runtime: None,
                     },
-                    setup,
-                    stream,
-                    status: status.clone(),
-                    status_history: vec![StatusEntry::new(status)],
-                    last_poll_at: None,
-                    refresh_rx: None,
-                }
-            }
-        }
+                    format!("Database initialization failed: {err}"),
+                ),
+            },
+            Err(err) => (
+                AppMode::Setup {
+                    previous_runtime: None,
+                },
+                first_run_status(&err),
+            ),
+        };
+        Self::initialize(
+            config_path,
+            database_path,
+            mode,
+            screens::setup::SetupState::default(),
+            status,
+        )
+    }
+
+    /// Initialize the shared app from caller-owned storage without loading user files.
+    fn from_storage(
+        config: AppConfig,
+        storage: Storage,
+        status: &str,
+    ) -> crate::storage::Result<Self> {
+        let setup = screens::setup::SetupState::from_config(&config);
+        let runtime = Self::runtime_from_storage(config, storage)?;
+        Ok(Self::initialize(
+            PathBuf::new(),
+            PathBuf::new(),
+            AppMode::Main(Box::new(runtime)),
+            setup,
+            status.to_owned(),
+        ))
+    }
+
+    fn initialize(
+        config_path: PathBuf,
+        database_path: PathBuf,
+        mode: AppMode,
+        setup: screens::setup::SetupState,
+        status: String,
+    ) -> Self {
+        let mut app = Self {
+            config_path,
+            database_path,
+            mode,
+            setup,
+            stream: screens::stream::StreamState::default(),
+            status: status.clone(),
+            status_history: vec![StatusEntry::new(status)],
+            last_poll_at: None,
+            refresh_rx: None,
+        };
+        app.reload_current_view();
+        app
     }
 
     fn open_runtime(
         config: AppConfig,
         database_path: &std::path::Path,
     ) -> crate::storage::Result<Runtime> {
-        let storage = Storage::open(database_path)?;
+        Self::runtime_from_storage(config, Storage::open(database_path)?)
+    }
+
+    fn runtime_from_storage(
+        config: AppConfig,
+        storage: Storage,
+    ) -> crate::storage::Result<Runtime> {
         let host_id = storage.ensure_host(&config.host)?;
         let (library_counts, saved_queries) = view::load_sidebar_data(&storage, host_id)?;
         Ok(Runtime {

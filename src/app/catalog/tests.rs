@@ -1,7 +1,9 @@
 use super::*;
 use crate::app::effects::ExternalEffect;
 use crate::app::screens::stream::{ItemAction, StreamEvent};
+use crate::app::Runtime;
 use crate::models::{FontSize, StreamSource, Theme};
+use crate::models::{LibraryView, Selection};
 
 fn runtime(app: &CatalogApp) -> &Runtime {
     let AppMode::Main(runtime) = &app.app.mode else {

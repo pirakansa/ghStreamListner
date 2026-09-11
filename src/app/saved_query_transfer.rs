@@ -79,21 +79,7 @@ impl GhStreamApp {
                 .replace_saved_queries(runtime.host_id, &imported.queries)
             {
                 Ok(inserted_ids) => {
-                    self.reload_queries();
-                    if let Some(first_id) = inserted_ids.first().copied() {
-                        self.stream.selection = Selection::SavedQuery(first_id);
-                        self.stream.reset_item_list_scroll = true;
-                    } else {
-                        self.stream.selection = Selection::Library(LibraryView::Inbox);
-                        self.stream.reset_item_list_scroll = true;
-                    }
-                    if let AppMode::Main(runtime) = &self.mode {
-                        crate::app::screens::saved_query_manager::open(
-                            &mut self.stream,
-                            &runtime.saved_queries,
-                        );
-                    }
-                    self.reload_current_view();
+                    self.finish_query_import(&inserted_ids);
                     let count = imported_names.len();
                     Self::replace_status(
                         &mut self.status,
@@ -111,5 +97,23 @@ impl GhStreamApp {
                 ),
             }
         }
+    }
+
+    /// Refresh the shared selection and screens after definitions are replaced.
+    pub(super) fn finish_query_import(&mut self, inserted_ids: &[i64]) {
+        self.reload_queries();
+        self.stream.selection = inserted_ids
+            .first()
+            .copied()
+            .map(Selection::SavedQuery)
+            .unwrap_or(Selection::Library(LibraryView::Inbox));
+        self.stream.reset_item_list_scroll = true;
+        if let AppMode::Main(runtime) = &self.mode {
+            crate::app::screens::saved_query_manager::open(
+                &mut self.stream,
+                &runtime.saved_queries,
+            );
+        }
+        self.reload_current_view();
     }
 }

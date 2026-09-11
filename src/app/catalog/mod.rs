@@ -2,8 +2,8 @@
 
 use eframe::egui;
 
-use super::{effects::ExternalEffect, screens, AppMode, GhStreamApp, Runtime, StatusEntry};
-use crate::models::{AppConfig, LibraryView, Selection};
+use super::{effects::ExternalEffect, screens, AppMode, GhStreamApp};
+use crate::models::AppConfig;
 use crate::saved_query_io::{ImportedFilterStream, ImportedSavedQuery};
 use crate::storage::{Result, Storage};
 
@@ -24,27 +24,11 @@ impl CatalogApp {
         let storage = Storage::in_memory()?;
         let host_id = storage.ensure_host(&config.host)?;
         fixtures::seed(&storage, host_id)?;
-        let status = "Demo: sample data; all changes stay in memory.".to_owned();
-        let mut app = GhStreamApp {
-            config_path: Default::default(),
-            database_path: Default::default(),
-            setup: screens::setup::SetupState::from_config(&config),
-            stream: Default::default(),
-            mode: AppMode::Main(Box::new(Runtime {
-                config,
-                storage,
-                host_id,
-                library_counts: Default::default(),
-                saved_queries: Vec::new(),
-                items: Vec::new(),
-            })),
-            status: status.clone(),
-            status_history: vec![StatusEntry::new(status)],
-            last_poll_at: None,
-            refresh_rx: None,
-        };
-        app.reload_queries();
-        app.reload_current_view();
+        let app = GhStreamApp::from_storage(
+            config,
+            storage,
+            "Demo: sample data; all changes stay in memory.",
+        )?;
         Ok(Self {
             app,
             exported_queries: None,

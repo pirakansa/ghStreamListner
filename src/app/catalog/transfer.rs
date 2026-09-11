@@ -49,17 +49,7 @@ impl CatalogApp {
                 .storage
                 .replace_saved_queries(runtime.host_id, &definitions)?;
         }
-        self.app.stream.selection = inserted_ids
-            .first()
-            .copied()
-            .map(Selection::SavedQuery)
-            .unwrap_or(Selection::Library(LibraryView::Inbox));
-        self.app.stream.reset_item_list_scroll = true;
-        self.app.reload_queries();
-        if let AppMode::Main(runtime) = &self.app.mode {
-            screens::saved_query_manager::open(&mut self.app.stream, &runtime.saved_queries);
-        }
-        self.app.reload_current_view();
+        self.app.finish_query_import(&inserted_ids);
         self.status("Demo import restored sample definitions in memory; no file was read. Refresh to rebuild matches.");
         Ok(())
     }

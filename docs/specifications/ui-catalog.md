@@ -21,6 +21,18 @@ production application executes real effects; the separate demo application
 executes simulated effects. New external effects must be handled exhaustively
 by both callers. No component branches on a demo flag or Cargo feature.
 
+Initialization belongs to `GhStreamApp`. Production startup supplies file paths;
+the demo supplies configuration, seeded storage, and an initial status through
+`GhStreamApp::from_storage`. Both use the same runtime and application-state
+initializers. The demo does not construct runtime fields, file-path placeholders,
+status history, or polling/refresh state itself.
+
+After either import mechanism replaces definitions, both callers invoke
+`GhStreamApp::finish_query_import`. This shared step reloads sidebar data, selects
+the first imported query (or Inbox for an empty import), resets scrolling, opens
+the query manager, and reloads the item view. File/snapshot handling and the
+completion message remain with each caller.
+
 The setup screen must emit a validated connection-test event rather than perform
 network I/O while drawing. The production caller retains the existing connection
 test behavior and result wording. The demo caller supplies a simulated result.
@@ -110,7 +122,8 @@ Validation on 2026-09-11:
 
 - Before revision, check, test, and build passed.
 - After revision, `vorbere run check`, `vorbere run test`, and
-  `vorbere run build` passed; all 155 tests succeeded.
+  `vorbere run build` passed; all 159 tests succeeded after the shared
+  initialization and import-completion refactor.
 - `tests/ui_catalog.rs` covers full-screen navigation, query/filter form text
   entry and saving, transfer navigation, and host Test/Save/Back.
 - Catalog unit tests cover memory-only storage, avatar inputs, shared local
@@ -118,6 +131,9 @@ Validation on 2026-09-11:
   routing, and the shared status-log screen.
 - Setup unit tests cover validated Test events and invalid input. A production
   connection-effect test verifies success/failure against a local mock server.
+- Startup tests cover persisted data, missing/invalid configuration, and database
+  failure. Import-completion tests cover first-query/Inbox selection, scroll reset,
+  query-manager navigation, and sidebar/item reloads for nonempty/empty imports.
 - Testing caught an invalid sample host kind, corrected to GHES. Test fixtures
   were also adjusted for hostname validation (mock ports are tested at the
   transport boundary), normal post-import navigation, and distinct input nodes.

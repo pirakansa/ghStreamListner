@@ -591,31 +591,10 @@ fn app_with_one_item() -> (GhStreamApp, i64) {
     storage
         .record_saved_query_match(query_id, item_id, Some(0))
         .expect("match");
-    let saved_queries = storage.list_saved_queries(host_id).expect("queries");
-    let library_counts = storage
-        .list_library_counts(host_id)
-        .expect("library counts");
-    let mut app = GhStreamApp {
-        config_path: temp_config_path(),
-        database_path: std::env::temp_dir().join("ghtl-test-unused.db"),
-        mode: AppMode::Main(Box::new(Runtime {
-            config,
-            storage,
-            host_id,
-            library_counts,
-            saved_queries,
-            items: Vec::new(),
-        })),
-        setup: screens::setup::SetupState::default(),
-        stream: screens::stream::StreamState {
-            selection: Selection::SavedQuery(query_id),
-            ..Default::default()
-        },
-        status: "Ready".to_owned(),
-        status_history: vec![StatusEntry::new("Ready")],
-        last_poll_at: None,
-        refresh_rx: None,
-    };
+    let mut app = GhStreamApp::from_storage(config, storage, "Ready").expect("app");
+    app.config_path = temp_config_path();
+    app.database_path = app.config_path.with_extension("db");
+    app.stream.selection = Selection::SavedQuery(query_id);
     app.reload_current_view();
     (app, item_id)
 }
@@ -798,5 +777,137 @@ fn production_setup_test_executes_connection_effect_and_displays_result() {
         );
         harness.run();
         harness.get_by_label_contains(expected);
+    }
+}
+
+#[test]
+fn startup_loads_saved_data_and_initializes_shared_state() {
+    let config_path = temp_config_path();
+    let database_path = config_path.with_extension("db");
+    let config = AppConfig::default_with_pat("sample-token".into());
+    config::write_config(&config_path, &config).unwrap();
+    {
+        let storage = Storage::open(&database_path).unwrap();
+        let host_id = storage.ensure_host(&config.host).unwrap();
+        let query_id = storage
+            .add_saved_query(host_id, "Stored query", "is:open")
+            .unwrap();
+        let item_id = storage
+            .upsert_stream_item(&sample_item(host_id))
+            .unwrap()
+            .id;
+        storage
+            .record_saved_query_match(query_id, item_id, None)
+            .unwrap();
+    }
+    let app = GhStreamApp::from_paths(config_path.clone(), database_path.clone());
+    assert_eq!(app.config_path, config_path);
+    assert_eq!(app.database_path, database_path);
+    assert_eq!(app.stream.selection, Selection::Library(LibraryView::Inbox));
+    assert_eq!(app.status, "Ready");
+    assert_eq!(app.status_history.len(), 1);
+    assert_eq!(app.status_history[0].message, app.status);
+    assert!(app.last_poll_at.is_none());
+    assert!(app.refresh_rx.is_none());
+    let AppMode::Main(runtime) = &app.mode else {
+        panic!("main mode")
+    };
+    assert_eq!(runtime.saved_queries[0].name, "Stored query");
+    assert_eq!(runtime.library_counts.inbox_unread_count, 1);
+    assert_eq!(runtime.items.len(), 1);
+}
+
+#[test]
+fn startup_without_valid_config_keeps_setup_status_and_does_not_open_database() {
+    for invalid_config in [false, true] {
+        let config_path = temp_config_path();
+        let database_path = config_path.with_extension("db");
+        if invalid_config {
+            std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+            std::fs::write(&config_path, "invalid: [").unwrap();
+        }
+        let app = GhStreamApp::from_paths(config_path, database_path.clone());
+        assert!(matches!(
+            app.mode,
+            AppMode::Setup {
+                previous_runtime: None
+            }
+        ));
+        assert!(app.status.starts_with(if invalid_config {
+            "Setup required:"
+        } else {
+            "First-run setup required."
+        }));
+        assert_eq!(app.status_history.len(), 1);
+        assert_eq!(app.status_history[0].message, app.status);
+        assert!(!database_path.exists());
+    }
+}
+
+#[test]
+fn startup_database_failure_returns_setup_with_original_error_prefix() {
+    let config_path = temp_config_path();
+    let database_path = config_path.with_extension("db");
+    config::write_config(
+        &config_path,
+        &AppConfig::default_with_pat("sample-token".into()),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&database_path).unwrap();
+    let app = GhStreamApp::from_paths(config_path, database_path);
+    assert!(matches!(
+        app.mode,
+        AppMode::Setup {
+            previous_runtime: None
+        }
+    ));
+    assert!(app.status.starts_with("Database initialization failed:"));
+    assert_eq!(app.status_history.len(), 1);
+    assert_eq!(app.status_history[0].message, app.status);
+}
+
+#[test]
+fn import_completion_handles_empty_and_nonempty_definitions_consistently() {
+    for keep_query in [false, true] {
+        let (mut app, _) = app_with_one_item();
+        let AppMode::Main(runtime) = &app.mode else {
+            panic!("main mode")
+        };
+        let definitions = if keep_query {
+            vec![crate::saved_query_io::ImportedSavedQuery {
+                name: "Replacement".into(),
+                query: "is:pr".into(),
+                source: StreamSource::IssueOrPullRequest,
+                enabled: true,
+                position: 0,
+                filter_streams: Vec::new(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let ids = runtime
+            .storage
+            .replace_saved_queries(runtime.host_id, &definitions)
+            .unwrap();
+        app.stream.reset_item_list_scroll = false;
+        let status = app.status.clone();
+        app.finish_query_import(&ids);
+        assert_eq!(
+            app.stream.selection,
+            if keep_query {
+                Selection::SavedQuery(ids[0])
+            } else {
+                Selection::Library(LibraryView::Inbox)
+            }
+        );
+        assert!(app.stream.reset_item_list_scroll);
+        assert!(app.stream.saved_query_manager.open);
+        assert_eq!(app.status, status);
+        let AppMode::Main(runtime) = &app.mode else {
+            panic!("main mode")
+        };
+        assert_eq!(runtime.saved_queries.len(), definitions.len());
+        assert!(runtime.items.is_empty());
+        assert_eq!(runtime.library_counts.inbox_unread_count, 0);
     }
 }
