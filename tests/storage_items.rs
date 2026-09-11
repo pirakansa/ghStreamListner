@@ -77,7 +77,7 @@ fn read_item_becomes_unread_when_github_updated_at_advances() {
 }
 
 #[test]
-fn unchanged_upsert_preserves_existing_relation_rows() {
+fn unchanged_upsert_preserves_rest_relations_and_updates_enriched_relations() {
     let storage = Storage::in_memory().expect("storage");
     let config = AppConfig::default_with_pat("token".to_owned());
     let host_id = storage.ensure_host(&config.host).expect("host");
@@ -110,7 +110,7 @@ fn unchanged_upsert_preserves_existing_relation_rows() {
         state: "changes_requested".to_owned(),
     }];
     let save = storage.upsert_stream_item(&item).expect("updated item");
-    assert!(!save.changed);
+    assert!(save.changed);
 
     let items = storage
         .list_items_for_saved_query(query_id, None, None, SortOrder::UpdatedDesc)
@@ -119,9 +119,9 @@ fn unchanged_upsert_preserves_existing_relation_rows() {
     assert_eq!(items[0].title, "Retitled");
     assert_eq!(items[0].labels, vec!["bug".to_owned()]);
     assert_eq!(items[0].assignees[0].login, "dev");
-    assert_eq!(items[0].review_requests[0].login, "triage");
-    assert_eq!(items[0].reviewers[0].login, "reviewer");
-    assert_eq!(items[0].reviewers[0].state, "approved");
+    assert_eq!(items[0].review_requests[0].login, "other-reviewer");
+    assert_eq!(items[0].reviewers[0].login, "approver");
+    assert_eq!(items[0].reviewers[0].state, "changes_requested");
 }
 
 #[test]
@@ -1099,4 +1099,236 @@ fn sample_item(host_id: i64) -> StreamItemUpsert {
         mentions: vec!["mentioned-user".to_owned()],
         graphql_enriched: true,
     }
+}
+
+#[test]
+fn query_definition_edits_reset_sync_and_matches_but_preserve_shared_state() {
+    for variant in 0..3 {
+        let storage = Storage::in_memory().expect("storage");
+        let config = AppConfig::default_with_pat("token".to_owned());
+        let host_id = storage.ensure_host(&config.host).expect("host");
+        let id = storage
+            .add_saved_query(host_id, "Old", "is:pr")
+            .expect("query");
+        let other = storage
+            .add_saved_query(host_id, "Other", "is:pr")
+            .expect("other query");
+        let item_id = storage
+            .upsert_stream_item(&sample_item(host_id))
+            .expect("item")
+            .id;
+        storage
+            .record_saved_query_match(id, item_id, None)
+            .expect("match");
+        storage
+            .record_saved_query_match(other, item_id, None)
+            .expect("shared match");
+        storage.set_read_state(item_id, false).expect("read");
+        storage.set_bookmarked(item_id, true).expect("bookmark");
+        storage.mark_saved_query_sync_success(id).expect("sync");
+        storage
+            .mark_saved_query_sync_error(id, "old failure")
+            .expect("error");
+        match variant {
+            0 => storage.update_saved_query(id, "New", "repo:acme/new"),
+            1 => {
+                storage.update_saved_query_for_source(id, "New", "is:pr", StreamSource::Discussion)
+            }
+            _ => storage.update_saved_query_configured(
+                id,
+                "New",
+                "repo:acme/new",
+                StreamSource::IssueOrPullRequest,
+                true,
+            ),
+        }
+        .expect("edit");
+        assert_eq!(
+            storage
+                .saved_query_last_successful_sync_at(id)
+                .expect("timestamp"),
+            None
+        );
+        let error: Option<String> = storage
+            .connection()
+            .query_row(
+                "SELECT last_sync_error FROM saved_queries WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .expect("error");
+        assert_eq!(error, None);
+        assert!(storage
+            .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+            .expect("items")
+            .is_empty());
+        let shared = storage
+            .list_items_for_saved_query(other, None, None, SortOrder::UpdatedDesc)
+            .expect("shared items");
+        assert_eq!(shared.len(), 1);
+        assert!(!shared[0].is_unread);
+        assert!(shared[0].is_bookmarked);
+    }
+}
+
+#[test]
+fn presentation_edits_preserve_sync_and_matches() {
+    let storage = Storage::in_memory().expect("storage");
+    let config = AppConfig::default_with_pat("token".to_owned());
+    let host_id = storage.ensure_host(&config.host).expect("host");
+    let id = storage
+        .add_saved_query(host_id, "Old", "is:pr")
+        .expect("query");
+    let item_id = storage
+        .upsert_stream_item(&sample_item(host_id))
+        .expect("item")
+        .id;
+    storage
+        .record_saved_query_match(id, item_id, None)
+        .expect("match");
+    storage.mark_saved_query_sync_success(id).expect("sync");
+    let timestamp = storage
+        .saved_query_last_successful_sync_at(id)
+        .expect("timestamp");
+    storage
+        .update_saved_query(id, "Renamed", " is:pr ")
+        .expect("rename");
+    storage
+        .update_saved_query_for_source(
+            id,
+            "Renamed again",
+            "is:pr",
+            StreamSource::IssueOrPullRequest,
+        )
+        .expect("rename");
+    storage
+        .update_saved_query_configured(
+            id,
+            "Disabled",
+            "is:pr",
+            StreamSource::IssueOrPullRequest,
+            false,
+        )
+        .expect("disable");
+    assert_eq!(
+        storage
+            .saved_query_last_successful_sync_at(id)
+            .expect("timestamp"),
+        timestamp
+    );
+    assert_eq!(
+        storage
+            .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+            .expect("items")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn failed_query_edit_rolls_back_sync_reset_and_match_deletion() {
+    let storage = Storage::in_memory().expect("storage");
+    let config = AppConfig::default_with_pat("token".to_owned());
+    let host_id = storage.ensure_host(&config.host).expect("host");
+    let id = storage
+        .add_saved_query(host_id, "Old", "is:pr")
+        .expect("query");
+    let item_id = storage
+        .upsert_stream_item(&sample_item(host_id))
+        .expect("item")
+        .id;
+    storage
+        .record_saved_query_match(id, item_id, None)
+        .expect("match");
+    storage.mark_saved_query_sync_success(id).expect("sync");
+    let timestamp = storage
+        .saved_query_last_successful_sync_at(id)
+        .expect("timestamp");
+    storage
+        .connection()
+        .execute_batch(
+            "CREATE TEMP TRIGGER reject_query_edit BEFORE UPDATE OF query ON saved_queries
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        )
+        .expect("trigger");
+    assert!(storage.update_saved_query(id, "New", "is:issue").is_err());
+    assert_eq!(
+        storage
+            .saved_query_last_successful_sync_at(id)
+            .expect("timestamp"),
+        timestamp
+    );
+    assert_eq!(
+        storage
+            .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+            .expect("items")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn only_successful_enrichment_can_clear_relations_at_the_same_timestamp() {
+    let storage = Storage::in_memory().expect("storage");
+    let config = AppConfig::default_with_pat("token".to_owned());
+    let host_id = storage.ensure_host(&config.host).expect("host");
+    let id = storage
+        .add_saved_query(host_id, "PRs", "is:pr")
+        .expect("query");
+    let mut item = sample_item(host_id);
+    let item_id = storage.upsert_stream_item(&item).expect("item").id;
+    storage
+        .record_saved_query_match(id, item_id, None)
+        .expect("match");
+    storage.set_read_state(item_id, false).expect("read");
+    item.graphql_enriched = false;
+    item.review_requests.clear();
+    item.reviewers.clear();
+    item.participants.clear();
+    item.mentions.clear();
+    assert!(
+        !storage
+            .upsert_stream_item(&item)
+            .expect("failed enrichment")
+            .changed
+    );
+    let preserved = storage
+        .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+        .expect("preserved");
+    assert_eq!(preserved[0].review_requests.len(), 1);
+    assert_eq!(preserved[0].reviewers.len(), 1);
+    for filter in ["involves:commenter", "involves:mentioned-user"] {
+        assert_eq!(
+            storage
+                .list_items_for_saved_query(id, None, Some(filter), SortOrder::UpdatedDesc)
+                .expect("preserved involvement")
+                .len(),
+            1
+        );
+    }
+    item.graphql_enriched = true;
+    assert!(
+        storage
+            .upsert_stream_item(&item)
+            .expect("successful enrichment")
+            .changed
+    );
+    let cleared = storage
+        .list_items_for_saved_query(id, None, None, SortOrder::UpdatedDesc)
+        .expect("cleared");
+    assert!(cleared[0].review_requests.is_empty());
+    assert!(cleared[0].reviewers.is_empty());
+    assert!(!cleared[0].is_unread);
+    for filter in ["involves:commenter", "involves:mentioned-user"] {
+        assert!(storage
+            .list_items_for_saved_query(id, None, Some(filter), SortOrder::UpdatedDesc)
+            .expect("cleared involvement")
+            .is_empty());
+    }
+    assert!(
+        !storage
+            .upsert_stream_item(&item)
+            .expect("identical enrichment")
+            .changed
+    );
 }

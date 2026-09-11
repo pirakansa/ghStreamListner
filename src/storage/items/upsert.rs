@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use rusqlite::params;
 
 use super::{
@@ -9,6 +11,9 @@ use crate::storage::{Result, Storage};
 struct ExistingStreamItem {
     id: i64,
     updated_at_github: String,
+    is_merged: Option<bool>,
+    review_status: Option<String>,
+    merged_at_github: Option<String>,
 }
 
 impl Storage {
@@ -21,6 +26,20 @@ impl Storage {
                 github_updated_at_advanced(&existing.updated_at_github, &item.updated_at_github)
             })
             .unwrap_or(true);
+
+        let enrichment_changed = if item.graphql_enriched {
+            match &existing_item {
+                Some(existing) if !changed => {
+                    existing.is_merged != item.is_merged
+                        || existing.review_status != item.review_status
+                        || existing.merged_at_github != item.merged_at_github
+                        || self.enrichment_relations_changed(existing.id, item)?
+                }
+                _ => true,
+            }
+        } else {
+            false
+        };
 
         self.connection().execute(
             "INSERT INTO stream_items (
@@ -95,15 +114,70 @@ impl Storage {
         if changed || existing_item.is_none() {
             self.replace_labels(id, &item.labels)?;
             self.replace_assignees(id, &item.assignees)?;
-            if item.graphql_enriched {
-                self.replace_review_requests(id, &item.review_requests)?;
-                self.replace_reviews(id, &item.reviewers)?;
-                self.replace_participants(id, &item.participants)?;
-                self.replace_mentions(id, &item.mentions)?;
-            }
+        }
+        if item.graphql_enriched && (changed || enrichment_changed) {
+            self.replace_review_requests(id, &item.review_requests)?;
+            self.replace_reviews(id, &item.reviewers)?;
+            self.replace_participants(id, &item.participants)?;
+            self.replace_mentions(id, &item.mentions)?;
         }
 
-        Ok(StreamItemSave { id, changed })
+        Ok(StreamItemSave {
+            id,
+            changed: changed || enrichment_changed,
+        })
+    }
+
+    fn enrichment_relations_changed(&self, id: i64, item: &StreamItemUpsert) -> Result<bool> {
+        let mut statement = self.connection().prepare(
+            "SELECT 'request', login, avatar_url, NULL FROM stream_item_review_requests
+             WHERE stream_item_id = ?1
+             UNION ALL
+             SELECT 'review', login, avatar_url, state FROM stream_item_reviews
+             WHERE stream_item_id = ?1
+             UNION ALL
+             SELECT 'participant', login, avatar_url, NULL FROM stream_item_participants
+             WHERE stream_item_id = ?1
+             UNION ALL
+             SELECT 'mention', login, NULL, NULL FROM stream_item_mentions
+             WHERE stream_item_id = ?1",
+        )?;
+        let existing = statement
+            .query_map(params![id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+        let mut incoming = BTreeSet::new();
+        for (kind, people) in [
+            ("request", &item.review_requests),
+            ("participant", &item.participants),
+        ] {
+            for person in people {
+                incoming.insert((
+                    kind.to_owned(),
+                    person.login.clone(),
+                    person.avatar_url.clone(),
+                    None,
+                ));
+            }
+        }
+        for review in &item.reviewers {
+            incoming.insert((
+                "review".to_owned(),
+                review.login.clone(),
+                review.avatar_url.clone(),
+                Some(review.state.clone()),
+            ));
+        }
+        for mention in &item.mentions {
+            incoming.insert(("mention".to_owned(), mention.clone(), None, None));
+        }
+        Ok(existing != incoming)
     }
 
     fn find_existing_stream_item(
@@ -111,7 +185,7 @@ impl Storage {
         item: &StreamItemUpsert,
     ) -> Result<Option<ExistingStreamItem>> {
         let result = self.connection().query_row(
-            "SELECT id, updated_at_github FROM stream_items
+            "SELECT id, updated_at_github, is_merged, review_status, merged_at_github FROM stream_items
              WHERE host_id = ?1
                AND repository_owner = ?2
                AND repository_name = ?3
@@ -128,6 +202,9 @@ impl Storage {
                 Ok(ExistingStreamItem {
                     id: row.get(0)?,
                     updated_at_github: row.get(1)?,
+                    is_merged: row.get(2)?,
+                    review_status: row.get(3)?,
+                    merged_at_github: row.get(4)?,
                 })
             },
         );

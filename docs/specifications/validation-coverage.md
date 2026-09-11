@@ -12,6 +12,12 @@ The current test suite covers:
 - Refresh write-before-render behavior
 - Refresh failure preserving existing stored items
 - GraphQL enrichment failure preserving existing pull request metadata
+- GraphQL recovery at the same item timestamp updating relations without marking
+  read items unread, and identical subsequent enrichment reporting no change
+- Delayed refresh persistence retaining each query's discovery start time as the
+  delta cursor, with failed persistence preserving the previous cursor
+- Query definition edits resetting sync metadata and matches atomically while
+  preserving shared item state, and obsolete refresh results being discarded
 - Shared item metadata save deduplication across overlapping saved queries
 - GraphQL enrichment deduplication and bounded batch execution
 - Successful GraphQL batch application when another batch fails
