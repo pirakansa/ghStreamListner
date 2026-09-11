@@ -760,3 +760,43 @@ fn status_history_keeps_recent_messages() {
         format!("Status {STATUS_HISTORY_LIMIT}")
     );
 }
+
+#[test]
+fn production_setup_test_executes_connection_effect_and_displays_result() {
+    use egui_kittest::{kittest::Queryable as _, Harness};
+    use httptest::{matchers::request, responders::status_code, Expectation, Server};
+    for (status, expected) in [
+        (200, "Connection succeeded."),
+        (401, "Configuration is valid, but connection failed:"),
+    ] {
+        let server = Server::run();
+        server.expect(
+            Expectation::matching(request::method_path("GET", "/user"))
+                .respond_with(status_code(status)),
+        );
+        let mut config = AppConfig::default_with_pat("sample-token".into());
+        config.host.scheme = crate::models::Scheme::Http;
+        config.host.hostname = server.addr().to_string();
+        config.host.kind = crate::models::HostKind::Ghes;
+        config.host.rest_api_base_path = "/".into();
+        let (mut app, _) = app_with_one_item();
+        app.open_setup_settings();
+        app.setup = screens::setup::SetupState::from_config(&config);
+        // Exercise the transport boundary directly: production form validation
+        // intentionally rejects ports, while the local mock uses an ephemeral port.
+        app.execute_effect(
+            &egui::Context::default(),
+            effects::ExternalEffect::TestConnection(config),
+        );
+        let mut harness = Harness::new_ui_state(
+            |ui, app: &mut GhStreamApp| {
+                if let Some(effect) = app.show(ui) {
+                    app.execute_effect(ui.ctx(), effect);
+                }
+            },
+            app,
+        );
+        harness.run();
+        harness.get_by_label_contains(expected);
+    }
+}

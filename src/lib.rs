@@ -1,4 +1,5 @@
 pub mod app;
+pub use app::catalog;
 pub mod config;
 pub mod github;
 pub mod models;

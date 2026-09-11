@@ -26,6 +26,10 @@ tasks:
     depends_on: [assets]
     run: cargo run
     desc: run native app
+  run-catalog:
+    depends_on: [assets]
+    run: cargo run --bin ghtl-ui-catalog
+    desc: run the full UI with disposable sample data
   debug:
     depends_on: [assets]
     run: RUST_LOG=debug cargo run

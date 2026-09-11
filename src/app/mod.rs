@@ -1,4 +1,6 @@
+pub mod catalog;
 pub mod components;
+mod effects;
 mod filter_stream_actions;
 pub mod fonts;
 mod item_actions;
@@ -265,15 +267,16 @@ impl eframe::App for GhStreamApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+        if let Some(effect) = self.show(ui) {
+            self.execute_effect(ui.ctx(), effect);
+        }
+    }
+}
 
-        let mode = std::mem::replace(
-            &mut self.mode,
-            AppMode::Setup {
-                previous_runtime: None,
-            },
-        );
-        match mode {
+impl GhStreamApp {
+    /// Draw the shared application and handle local actions, returning external work.
+    fn show(&mut self, ui: &mut egui::Ui) -> Option<effects::ExternalEffect> {
+        match &self.mode {
             AppMode::Setup { previous_runtime } => {
                 let event = screens::setup::show(
                     ui,
@@ -281,10 +284,12 @@ impl eframe::App for GhStreamApp {
                     &self.status,
                     previous_runtime.is_some(),
                 );
-                self.mode = AppMode::Setup { previous_runtime };
                 match event {
                     Some(screens::setup::SetupEvent::Save(config)) => {
-                        self.save_setup_config(config);
+                        return Some(effects::ExternalEffect::SaveSetup(config))
+                    }
+                    Some(screens::setup::SetupEvent::Test(config)) => {
+                        return Some(effects::ExternalEffect::TestConnection(config))
                     }
                     Some(screens::setup::SetupEvent::Cancel) => {
                         let AppMode::Setup { previous_runtime } = std::mem::replace(
@@ -293,7 +298,7 @@ impl eframe::App for GhStreamApp {
                                 previous_runtime: None,
                             },
                         ) else {
-                            unreachable!("setup cancel is only emitted from setup mode");
+                            unreachable!()
                         };
                         self.cancel_setup(previous_runtime);
                     }
@@ -301,9 +306,9 @@ impl eframe::App for GhStreamApp {
                 }
             }
             AppMode::Main(runtime) => {
-                preferences::apply_theme_from_config(&ctx, &runtime.config);
-                preferences::apply_font_size_from_config(&ctx, &runtime.config);
-                self.stream.avatar_cache.poll(&ctx);
+                preferences::apply_theme_from_config(ui.ctx(), &runtime.config);
+                preferences::apply_font_size_from_config(ui.ctx(), &runtime.config);
+                self.stream.avatar_cache.poll(ui.ctx());
                 let event = screens::stream::show(
                     ui,
                     &mut self.stream,
@@ -313,94 +318,94 @@ impl eframe::App for GhStreamApp {
                     &runtime.items,
                     &self.status_history,
                 );
-                self.mode = AppMode::Main(runtime);
-                match event {
-                    Some(screens::stream::StreamEvent::Select(selection)) => self.select(selection),
-                    Some(screens::stream::StreamEvent::SetFilter(filter)) => {
-                        self.set_filter(filter)
-                    }
-                    Some(screens::stream::StreamEvent::SetLocalFilter(filter)) => {
-                        self.set_local_filter(filter)
-                    }
-                    Some(screens::stream::StreamEvent::AddLocalFilterInputTerm(term)) => {
-                        self.add_local_filter_input_term(&term)
-                    }
-                    Some(screens::stream::StreamEvent::AddFilterStream {
-                        saved_query_id,
-                        name,
-                        filter_query,
-                        enabled,
-                    }) => self.add_filter_stream(saved_query_id, &name, &filter_query, enabled),
-                    Some(screens::stream::StreamEvent::AddQuery {
-                        name,
-                        query,
-                        source,
-                        enabled,
-                    }) => self.add_query(&name, &query, source, enabled),
-                    Some(screens::stream::StreamEvent::PreviewQuery { query, source }) => {
-                        self.preview_query(&query, source)
-                    }
-                    Some(screens::stream::StreamEvent::UpdateFilterStream {
-                        id,
-                        name,
-                        filter_query,
-                        enabled,
-                    }) => self.update_filter_stream(id, &name, &filter_query, enabled),
-                    Some(screens::stream::StreamEvent::UpdateQuery {
-                        id,
-                        name,
-                        query,
-                        source,
-                        enabled,
-                    }) => self.update_query(id, &name, &query, source, enabled),
-                    Some(screens::stream::StreamEvent::DeleteFilterStream(id)) => {
-                        self.delete_filter_stream(id)
-                    }
-                    Some(screens::stream::StreamEvent::DeleteQuery(id)) => self.delete_query(id),
-                    Some(screens::stream::StreamEvent::MoveQueryUp(id)) => self.move_query_up(id),
-                    Some(screens::stream::StreamEvent::MoveQueryDown(id)) => {
-                        self.move_query_down(id)
-                    }
-                    Some(screens::stream::StreamEvent::MarkLibraryRead(library)) => {
-                        self.mark_library_read(library)
-                    }
-                    Some(screens::stream::StreamEvent::MarkFilterStreamRead(id)) => {
-                        self.mark_filter_stream_read(id)
-                    }
-                    Some(screens::stream::StreamEvent::MarkSavedQueryRead(id)) => {
-                        self.mark_saved_query_read(id)
-                    }
-                    Some(screens::stream::StreamEvent::ExportQueries(path)) => {
-                        self.export_queries(&path)
-                    }
-                    Some(screens::stream::StreamEvent::ImportQueries(path)) => {
-                        self.import_queries(&path)
-                    }
-                    Some(screens::stream::StreamEvent::RefreshNow) => self.refresh_now(ctx.clone()),
-                    Some(screens::stream::StreamEvent::ShowRemoteUpdates) => {
-                        self.reload_current_view()
-                    }
-                    Some(screens::stream::StreamEvent::SetDefaultSort(sort)) => {
-                        self.update_default_sort(sort)
-                    }
-                    Some(screens::stream::StreamEvent::SetPollingInterval(seconds)) => {
-                        self.update_polling_interval(seconds);
-                        self.stream.polling_interval_draft = 0; // reset so it re-syncs from config
-                    }
-                    Some(screens::stream::StreamEvent::SetTheme(theme)) => {
-                        self.update_theme(&ctx, theme)
-                    }
-                    Some(screens::stream::StreamEvent::SetFontSize(size)) => {
-                        self.update_font_size(&ctx, size)
-                    }
-                    Some(screens::stream::StreamEvent::OpenSetup) => self.open_setup_settings(),
-                    Some(screens::stream::StreamEvent::ItemAction(action)) => {
-                        self.item_action(action)
-                    }
-                    None => {}
-                }
+                return event.and_then(|event| self.handle_stream_event(event));
             }
         }
+        None
+    }
+
+    fn handle_stream_event(
+        &mut self,
+        event: screens::stream::StreamEvent,
+    ) -> Option<effects::ExternalEffect> {
+        match event {
+            screens::stream::StreamEvent::Select(selection) => self.select(selection),
+            screens::stream::StreamEvent::SetFilter(filter) => self.set_filter(filter),
+            screens::stream::StreamEvent::SetLocalFilter(filter) => self.set_local_filter(filter),
+            screens::stream::StreamEvent::AddLocalFilterInputTerm(term) => {
+                self.add_local_filter_input_term(&term)
+            }
+            screens::stream::StreamEvent::AddFilterStream {
+                saved_query_id,
+                name,
+                filter_query,
+                enabled,
+            } => self.add_filter_stream(saved_query_id, &name, &filter_query, enabled),
+            screens::stream::StreamEvent::AddQuery {
+                name,
+                query,
+                source,
+                enabled,
+            } => self.add_query(&name, &query, source, enabled),
+            screens::stream::StreamEvent::PreviewQuery { query, source } => {
+                return Some(effects::ExternalEffect::PreviewQuery { query, source })
+            }
+            screens::stream::StreamEvent::UpdateFilterStream {
+                id,
+                name,
+                filter_query,
+                enabled,
+            } => self.update_filter_stream(id, &name, &filter_query, enabled),
+            screens::stream::StreamEvent::UpdateQuery {
+                id,
+                name,
+                query,
+                source,
+                enabled,
+            } => self.update_query(id, &name, &query, source, enabled),
+            screens::stream::StreamEvent::DeleteFilterStream(id) => self.delete_filter_stream(id),
+            screens::stream::StreamEvent::DeleteQuery(id) => self.delete_query(id),
+            screens::stream::StreamEvent::MoveQueryUp(id) => self.move_query_up(id),
+            screens::stream::StreamEvent::MoveQueryDown(id) => self.move_query_down(id),
+            screens::stream::StreamEvent::MarkLibraryRead(library) => {
+                self.mark_library_read(library)
+            }
+            screens::stream::StreamEvent::MarkFilterStreamRead(id) => {
+                self.mark_filter_stream_read(id)
+            }
+            screens::stream::StreamEvent::MarkSavedQueryRead(id) => self.mark_saved_query_read(id),
+            screens::stream::StreamEvent::ExportQueries(path) => {
+                return Some(effects::ExternalEffect::ExportQueries(path))
+            }
+            screens::stream::StreamEvent::ImportQueries(path) => {
+                return Some(effects::ExternalEffect::ImportQueries(path))
+            }
+            screens::stream::StreamEvent::RefreshNow => {
+                return Some(effects::ExternalEffect::Refresh)
+            }
+            screens::stream::StreamEvent::ShowRemoteUpdates => self.reload_current_view(),
+            screens::stream::StreamEvent::SetDefaultSort(sort) => {
+                return Some(effects::ExternalEffect::SetDefaultSort(sort))
+            }
+            screens::stream::StreamEvent::SetPollingInterval(seconds) => {
+                return Some(effects::ExternalEffect::SetPollingInterval(seconds));
+            }
+            screens::stream::StreamEvent::SetTheme(theme) => {
+                return Some(effects::ExternalEffect::SetTheme(theme))
+            }
+            screens::stream::StreamEvent::SetFontSize(size) => {
+                return Some(effects::ExternalEffect::SetFontSize(size))
+            }
+            screens::stream::StreamEvent::OpenSetup => self.open_setup_settings(),
+            screens::stream::StreamEvent::ItemAction(screens::stream::ItemAction::Open {
+                id,
+                url,
+            }) => {
+                return Some(effects::ExternalEffect::OpenItem { id, url });
+            }
+            screens::stream::StreamEvent::ItemAction(action) => self.item_action(action),
+        }
+        None
     }
 }
 

@@ -1,7 +1,6 @@
 use eframe::egui;
 
 use crate::config;
-use crate::github;
 use crate::models::{AppConfig, HostKind, Scheme};
 
 pub struct SetupState {
@@ -32,9 +31,14 @@ impl Default for SetupState {
 pub enum SetupEvent {
     Cancel,
     Save(AppConfig),
+    Test(AppConfig),
 }
 
 impl SetupState {
+    pub(in crate::app) fn set_validation_message(&mut self, message: String) {
+        self.validation_message = message;
+    }
+
     pub fn from_config(config: &AppConfig) -> Self {
         Self {
             name: config.host.name.clone(),
@@ -115,20 +119,7 @@ pub fn show(
         ui.horizontal(|ui| {
             if ui.button("Test").clicked() {
                 match config::validate_config(build_config(state)) {
-                    Ok(config) => match github::test_connection(&config) {
-                        Ok(()) => {
-                            state.validation_message = format!(
-                                "Connection succeeded. REST: {} GraphQL: {}",
-                                config.host.rest_api_base_url(),
-                                config.host.graphql_url()
-                            );
-                        }
-                        Err(err) => {
-                            state.validation_message = format!(
-                                "Configuration is valid, but connection failed: {err}"
-                            );
-                        }
-                    },
+                    Ok(config) => event = Some(SetupEvent::Test(config)),
                     Err(err) => state.validation_message = err.to_string(),
                 }
             }
@@ -161,4 +152,48 @@ fn build_config(state: &SetupState) -> AppConfig {
     config.host.rest_api_base_path = state.rest_api_base_path.clone();
     config.host.kind = state.kind.clone();
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{kittest::Queryable as _, Harness};
+
+    #[test]
+    fn test_button_emits_validated_config_without_connecting() {
+        let mut config = AppConfig::default_with_pat("sample-token".into());
+        config.host.hostname = "never-connect.example.test".into();
+        config.host.kind = HostKind::Ghes;
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut (SetupState, Option<SetupEvent>)| {
+                if let Some(event) = show(ui, &mut state.0, "", true) {
+                    state.1 = Some(event);
+                }
+            },
+            (SetupState::from_config(&config), None),
+        );
+        harness.get_by_label("Test").click();
+        harness.run();
+        let Some(SetupEvent::Test(actual)) = &harness.state().1 else {
+            panic!("test event")
+        };
+        assert_eq!(actual.host.hostname, config.host.hostname);
+        assert_eq!(actual.auth.pat, config.auth.pat);
+    }
+
+    #[test]
+    fn test_and_save_reject_invalid_config_in_shared_form() {
+        let mut harness = Harness::new_ui_state(
+            |ui, state: &mut (SetupState, Option<SetupEvent>)| {
+                state.1 = show(ui, &mut state.0, "", true);
+            },
+            (SetupState::default(), None),
+        );
+        for label in ["Test", "Save"] {
+            harness.get_by_label(label).click();
+            harness.run();
+            assert!(harness.state().1.is_none());
+            assert!(!harness.state().0.validation_message.is_empty());
+        }
+    }
 }

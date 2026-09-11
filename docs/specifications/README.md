@@ -39,6 +39,8 @@ Out of v1 scope:
 
 ## References
 
+- [UI demo](ui-catalog.md): shared application UI, simulated effects, and implementation plan.
+
 - [Configuration](configuration.md): YAML keys, defaults, validation, and API URL
   derivation.
 - [Persistence](persistence.md): local storage boundaries and host identity.
