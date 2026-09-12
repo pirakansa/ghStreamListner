@@ -2,6 +2,8 @@
 
 These guides explain how to use `ghTimeLine` in day-to-day workflows.
 
+- [UI demo](ui-catalog.md): explore the full application with sample data.
+
 - [Getting started](getting-started.md): start the app and complete first-run
   setup.
 - [Local data](local-data.md): find local configuration and database files.

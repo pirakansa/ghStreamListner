@@ -1,7 +1,8 @@
 [package]
 name = "ghtl"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
+default-run = "ghtl"
 description = "GitHub Stream reader for saved search queries"
 license = "MIT"
 repository = ""
@@ -10,6 +11,15 @@ readme = "README.md"
 [[bin]]
 name = "ghtl"
 path = "src/main.rs"
+
+[[bin]]
+name = "ghtl-ui-catalog"
+path = "src/bin/ghtl-ui-catalog.rs"
+required-features = ["ui-demo"]
+
+[features]
+default = []
+ui-demo = []
 
 [dependencies]
 chrono = "0.4.44"

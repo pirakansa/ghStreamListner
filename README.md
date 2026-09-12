@@ -39,6 +39,9 @@ vorbere run build
 `vorbere run run` starts the native desktop app. The other commands match the
 local validation expected before opening a pull request.
 
+Use `vorbere run run-catalog` to explore the full application with sample data
+in a separate binary. See the [UI demo guide](docs/user-guides/ui-catalog.md).
+
 ## Documentation
 
 - [User guides](docs/user-guides/README.md): day-to-day usage and workflows
