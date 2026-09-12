@@ -9,8 +9,14 @@ vorbere run run-catalog
 A graphical desktop is required. The window title is **ghTimeLine Demo**.
 `cargo run` and `vorbere run run` still start the production application.
 The catalog task prepares the shared font asset and runs
-`cargo run --bin ghtl-ui-catalog`. Use it for day-to-day UI development; use
+`cargo run --features ui-demo --bin ghtl-ui-catalog`. Use it for day-to-day UI development; use
 `vorbere run run` when checking real host integration.
+
+The `ui-demo` Cargo feature is disabled by default. The task enables it for you;
+normal builds omit the demo module and executable. To validate development
+changes, run `vorbere run test` for the normal configuration and
+`vorbere run test-catalog` for the demo-enabled configuration. The latter also
+runs the demo build and static checks. `vorbere run ci` validates both.
 
 The demo opens directly into the usual stream view, with the same sidebar,
 menus, toolbar, item cards, and forms. There is no separate component catalog.

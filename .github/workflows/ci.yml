@@ -34,3 +34,6 @@ jobs:
 
       - name: Build
         run: vorbere run build
+
+      - name: Check and test UI demo
+        run: vorbere run test-catalog

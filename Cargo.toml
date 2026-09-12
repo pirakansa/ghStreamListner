@@ -12,6 +12,15 @@ readme = "README.md"
 name = "ghtl"
 path = "src/main.rs"
 
+[[bin]]
+name = "ghtl-ui-catalog"
+path = "src/bin/ghtl-ui-catalog.rs"
+required-features = ["ui-demo"]
+
+[features]
+default = []
+ui-demo = []
+
 [dependencies]
 chrono = "0.4.44"
 dirs-next = "2.0.0"

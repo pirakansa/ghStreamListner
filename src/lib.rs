@@ -1,4 +1,5 @@
 pub mod app;
+#[cfg(feature = "ui-demo")]
 pub use app::catalog;
 pub mod config;
 pub mod github;

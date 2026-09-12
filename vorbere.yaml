@@ -28,8 +28,20 @@ tasks:
     desc: run native app
   run-catalog:
     depends_on: [assets]
-    run: cargo run --bin ghtl-ui-catalog
+    run: cargo run --features ui-demo --bin ghtl-ui-catalog
     desc: run the full UI with disposable sample data
+  build-catalog:
+    depends_on: [assets]
+    run: cargo build --features ui-demo --bin ghtl-ui-catalog
+    desc: build the UI demo
+  check-catalog:
+    depends_on: [fmt-check, assets]
+    run: cargo clippy --all-targets --features ui-demo -- -D warnings
+    desc: run static checks with the UI demo enabled
+  test-catalog:
+    depends_on: [check-catalog, build-catalog]
+    run: cargo test --all --features ui-demo
+    desc: run the test suite with the UI demo enabled
   debug:
     depends_on: [assets]
     run: RUST_LOG=debug cargo run
@@ -88,7 +100,7 @@ tasks:
     depends_on: [release-archives]
     desc: build and archive all release artifacts
   ci:
-    depends_on: [check, test]
+    depends_on: [check, test, test-catalog]
     desc: run CI-equivalent validation
   clean:
     run: |

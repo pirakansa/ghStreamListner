@@ -1,3 +1,4 @@
+#[cfg(feature = "ui-demo")]
 pub mod catalog;
 pub mod components;
 mod effects;
@@ -115,6 +116,7 @@ impl GhStreamApp {
     }
 
     /// Initialize the shared app from caller-owned storage without loading user files.
+    #[cfg(any(test, feature = "ui-demo"))]
     fn from_storage(
         config: AppConfig,
         storage: Storage,

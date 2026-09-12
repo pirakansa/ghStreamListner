@@ -63,15 +63,35 @@ including nested people, so rendering uses the existing initials placeholders.
   visible but no file is accessed. Reject empty paths. Import clears matches;
   Refresh repopulates them. Status messages explain the simulation.
 - Restarting the demo resets all data and preferences. `cargo run` still starts
-  the production binary; `cargo run --bin ghtl-ui-catalog` starts the demo.
+  the production binary; `cargo run --features ui-demo --bin ghtl-ui-catalog` starts the demo.
   `vorbere run run-catalog` prepares assets and launches the demo, while
   `vorbere run run` retains its production-app behavior.
+
+## Build boundary
+
+The `ui-demo` feature is opt-in (`default = []`). It gates the catalog module,
+its library re-export, and the catalog integration test. The demo executable
+requires this feature. Normal builds omit the demo code and skip its executable.
+Shared UI, local operations, runtime initialization, and external-effect routing
+remain feature-independent. Only the caller-owned-storage constructor is gated
+with `any(test, feature = "ui-demo")`, since ordinary unit tests also use it.
+
+`run-catalog`, `build-catalog`, `check-catalog`, and `test-catalog` enable the
+feature explicitly. Normal build/check/test tasks retain default features.
+`test-catalog` depends on the demo build and static checks and runs the complete
+suite with the feature enabled. GitHub CI and the local `ci` task validate both
+configurations so neither branch of the build boundary goes unchecked.
+
+Feature-boundary validation on 2026-09-12: the default check, test, and build
+tasks passed (150 tests); `test-catalog`, including its static-check and build
+dependencies, passed with `ui-demo` enabled (159 tests). Requesting the demo
+binary without its feature was rejected by Cargo as intended.
 
 ## Source layout
 
 - `src/main.rs`: startup for the production executable.
 - `src/bin/ghtl-ui-catalog.rs`: startup for the additional demo executable,
-  using Cargo's conventional binary discovery. It installs fonts and opens
+  declared in Cargo.toml with `required-features = ["ui-demo"]`. It installs fonts and opens
   the native window; it does not implement the demo's data or operations.
 - `src/app/`: shared application screens, state, and local action handling.
 - `src/app/catalog/`: demo initialization, fixtures, and simulated effects.

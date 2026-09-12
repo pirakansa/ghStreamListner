@@ -1,3 +1,5 @@
+#![cfg(feature = "ui-demo")]
+
 use egui_kittest::{kittest::Queryable as _, Harness};
 use ghtl::catalog::CatalogApp;
 
