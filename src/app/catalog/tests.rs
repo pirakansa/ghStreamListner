@@ -154,16 +154,85 @@ fn preferences_and_host_save_stay_in_memory_and_keep_sample_data() {
 #[test]
 fn transfer_uses_snapshots_without_accessing_the_supplied_path() {
     let mut app = CatalogApp::new().unwrap();
+    let expected = vec![
+        ImportedSavedQuery {
+            name: "Zeta project".into(),
+            query: "org:sample-team project:42".into(),
+            source: StreamSource::ProjectV2,
+            enabled: true,
+            position: 7,
+            filter_streams: vec![
+                ImportedFilterStream {
+                    name: "Review queue".into(),
+                    filter_query: "is:pr assignee:sample-reviewer".into(),
+                    enabled: true,
+                    position: 9,
+                },
+                ImportedFilterStream {
+                    name: "Paused issues".into(),
+                    filter_query: "is:issue label:triage".into(),
+                    enabled: false,
+                    position: 3,
+                },
+            ],
+        },
+        ImportedSavedQuery {
+            name: "Alpha issues".into(),
+            query: "repo:sample-team/other is:issue".into(),
+            source: StreamSource::IssueOrPullRequest,
+            enabled: true,
+            position: 11,
+            filter_streams: Vec::new(),
+        },
+        ImportedSavedQuery {
+            name: "Paused discussions".into(),
+            query: "repo:sample-team/community category:ideas".into(),
+            source: StreamSource::Discussion,
+            enabled: false,
+            position: 2,
+            filter_streams: Vec::new(),
+        },
+    ];
+    let current = runtime(&app);
+    current
+        .storage
+        .replace_saved_queries(current.host_id, &expected)
+        .unwrap();
+    app.app.reload_queries();
     let path = std::env::temp_dir().join(format!("ghtl-demo-transfer-{}", std::process::id()));
     assert!(!path.exists());
     let path = path.to_string_lossy().into_owned();
     dispatch(&mut app, StreamEvent::ExportQueries(path.clone()));
     assert!(!std::path::Path::new(&path).exists());
-    let id = runtime(&app).saved_queries[0].id;
-    dispatch(&mut app, StreamEvent::DeleteQuery(id));
-    assert_eq!(runtime(&app).saved_queries.len(), 1);
+    // Replace the live definitions after export so restoration cannot read them
+    // back or silently fall back to the built-in fixture definitions.
+    let current = runtime(&app);
+    current
+        .storage
+        .replace_saved_queries(current.host_id, &fixtures::definitions())
+        .unwrap();
+    app.app.reload_queries();
+    assert_eq!(runtime(&app).saved_queries[0].name, "Sample work");
     dispatch(&mut app, StreamEvent::ImportQueries(path));
-    assert_eq!(runtime(&app).saved_queries.len(), 2);
+    let restored = &runtime(&app).saved_queries;
+    assert_eq!(restored.len(), expected.len());
+    for (actual, expected) in restored.iter().zip(&expected) {
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.query, expected.query);
+        assert_eq!(actual.source, expected.source);
+        assert_eq!(actual.enabled, expected.enabled);
+        assert_eq!(actual.position, expected.position);
+        assert_eq!(actual.filter_streams.len(), expected.filter_streams.len());
+        for (actual_filter, expected_filter) in
+            actual.filter_streams.iter().zip(&expected.filter_streams)
+        {
+            assert_eq!(actual_filter.saved_query_id, actual.id);
+            assert_eq!(actual_filter.name, expected_filter.name);
+            assert_eq!(actual_filter.filter_query, expected_filter.filter_query);
+            assert_eq!(actual_filter.enabled, expected_filter.enabled);
+            assert_eq!(actual_filter.position, expected_filter.position);
+        }
+    }
     assert!(runtime(&app).items.is_empty());
     dispatch(&mut app, StreamEvent::RefreshNow);
     assert!(!runtime(&app).items.is_empty());
